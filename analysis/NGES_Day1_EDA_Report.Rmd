@@ -1,0 +1,408 @@
+---
+title: "NGES Consulting Engagement - Day 1: Data Quality Review & Exploratory Data Analysis"
+author: "Ujwal Dasari"
+date: "`r format(Sys.time(), '%B %d, %Y  %H:%M:%S')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    code_folding: show
+    number_sections: true
+  word_document:
+    toc: true
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 8, fig.height = 4.5)
+# Chart palette used across the whole engagement so every figure looks consistent
+c_blue   <- "#2a78d6"   # primary series color
+c_orange <- "#eb6834"   # second series color
+c_aqua   <- "#1baf7a"   # third series color
+c_red    <- "#d03b3b"   # reserved for risk / problem highlights only
+c_muted  <- "#898781"   # axis text and de-emphasized bars
+c_grid   <- "#e1e0d9"   # hairline gridlines
+theme_nges <- function() {
+  ggplot2::theme_minimal(base_size = 12) +
+    ggplot2::theme(panel.grid.minor = ggplot2::element_blank(),
+                   panel.grid.major = ggplot2::element_line(color = c_grid),
+                   plot.title = ggplot2::element_text(face = "bold"),
+                   axis.text = ggplot2::element_text(color = c_muted))
+}
+```
+
+# Introduction
+
+NorthGrid Energy Services (NGES) asked our consulting team to figure out why peak
+demand events keep climbing (14 in 2022 up to 34 in 2025), which parts of the grid
+carry the most risk, and whether their demand response spending is paying off.
+Leadership put the financial exposure from demand volatility at $95-120 million.
+
+Day 1 is about getting to know the data honestly before we model anything. We were
+given three datasets: an hourly demand and forecasting file, a substation-level
+infrastructure risk file, and a demand response event file. This report covers the
+data quality checks and the exploratory analysis for all three, and closes with the
+working hypotheses we will test with predictive models on Day 2.
+
+```{r load-data}
+# Load the tidyverse for data wrangling and plotting
+library(tidyverse)
+library(scales)
+library(knitr)
+
+# The three CSVs are expected either next to this .Rmd or two folders up
+# (the Deliverables/Friday location inside the project folder).
+data_dir <- if (file.exists("NGES Energy Demand Forecasting Dataset.csv")) "." else "../data"
+
+# read_csv handles the byte-order mark at the start of these files automatically
+demand <- read_csv(file.path(data_dir, "NGES Energy Demand Forecasting Dataset.csv"))
+infra  <- read_csv(file.path(data_dir, "NGES Infrastructure Risk & Planning Dataset.csv"))
+dr     <- read_csv(file.path(data_dir, "NGES Demand Response Effectiveness Dataset.csv"))
+
+# Parse the timestamp (month/day/year hour:minute) and add calendar helpers
+demand <- demand %>%
+  mutate(Timestamp = mdy_hm(Timestamp),
+         Date      = as_date(Timestamp),
+         Hour      = hour(Timestamp),
+         Month     = month(Timestamp),
+         MonthLab  = floor_date(Timestamp, "month"),
+         Weekend   = wday(Timestamp) %in% c(1, 7),
+         Season    = case_when(Month %in% c(12, 1, 2) ~ "Winter",
+                               Month %in% 3:5  ~ "Spring",
+                               Month %in% 6:8  ~ "Summer",
+                               TRUE            ~ "Fall"))
+dim(demand); dim(infra); dim(dr)
+```
+
+The demand file holds 25,000 hourly records running from January 1, 2023 to
+November 7, 2025 across five regions (North, South, East, West, Central) and 100
+substation IDs. The infrastructure file covers 500 substations, and the demand
+response file logs 8,000 program events.
+
+# Data Quality Assessment
+
+```{r quality}
+# Count missing values per column in each dataset
+colSums(is.na(demand)) %>% .[. > 0]
+colSums(is.na(infra))  %>% sum()
+colSums(is.na(dr))     %>% sum()
+
+# Check for duplicate rows in all three files
+c(demand = sum(duplicated(demand)),
+  infra  = sum(duplicated(infra)),
+  dr     = sum(duplicated(dr)))
+
+# Sanity-check the physical ranges of the weather readings
+summary(dplyr::select(demand, Temperature, Humidity, WindSpeed))
+```
+
+Three columns in the demand file have missing values: Temperature (500 rows),
+Humidity (500 rows) and ForecastedDemandMW (500 rows), each about 2% of the file.
+Only 6 rows are missing both a temperature and a forecast, so the gaps look
+independent rather than caused by one broken feed. This matches the "missing
+weather observations" warning in the engagement packet. The infrastructure and
+demand response files are complete, and none of the three files contain duplicate
+rows.
+
+The weather columns do contain physically doubtful readings. Temperature runs as
+high as 131.2 F and humidity ranges from -34.3 to 130.2, and negative humidity is
+not possible. We treat these as sensor or data-entry errors. Because (as the next
+sections show) weather turns out to have almost no relationship with demand in
+this data, these outliers do not change any conclusion, but we document them and
+will use median imputation for the missing weather values in the Day 2 models.
+
+```{r error-check}
+# Confirm the ForecastErrorMW column really equals Actual minus Forecast
+demand %>%
+  filter(!is.na(ForecastedDemandMW)) %>%
+  summarise(max_inconsistency = max(abs(ForecastErrorMW -
+                                    (ActualDemandMW - ForecastedDemandMW))))
+```
+
+The stored forecast error column reconciles exactly with actual minus forecast,
+so the file is internally consistent.
+
+# Demand Patterns Over Time
+
+```{r monthly-trend, fig.cap="Average demand by month"}
+# Average demand per calendar month across the whole period
+monthly <- demand %>%
+  group_by(MonthLab) %>%
+  summarise(AvgDemand = mean(ActualDemandMW), .groups = "drop")
+
+ggplot(monthly, aes(MonthLab, AvgDemand)) +
+  geom_line(color = c_blue, linewidth = 1) +
+  labs(title = "Average hourly demand by month, Jan 2023 - Nov 2025",
+       x = NULL, y = "Average demand (MW)") +
+  theme_nges()
+```
+
+The first surprise of the engagement shows up here. Monthly average demand is
+almost flat, moving only between about 746 and 757 MW across nearly three years.
+There is no summer air-conditioning hump and no winter heating spike. Whatever is
+driving NGES's peak events, it is not the seasonal cycle we normally expect from
+a utility.
+
+```{r hourly-profile}
+# Average demand by hour of day, and weekday versus weekend
+demand %>%
+  group_by(Hour) %>%
+  summarise(AvgDemand = mean(ActualDemandMW), .groups = "drop") %>%
+  ggplot(aes(Hour, AvgDemand)) +
+  geom_line(color = c_blue, linewidth = 1) +
+  labs(title = "Average demand by hour of day",
+       x = "Hour", y = "Average demand (MW)") +
+  theme_nges()
+
+demand %>%
+  group_by(Weekend) %>%
+  summarise(AvgDemand_MW = round(mean(ActualDemandMW), 1), .groups = "drop") %>%
+  kable(caption = "Weekday vs weekend demand")
+```
+
+The hourly profile is equally flat: every hour of the day averages within about
+2 MW of every other hour, and weekends (749.9 MW) look the same as weekdays
+(750.6 MW). Regional averages sit in a narrow band too, from 748.1 MW in the East
+to 753.9 MW in the North. Calendar and geography explain very little here.
+
+# Weather Sensitivity
+
+```{r weather, fig.cap="Temperature vs demand"}
+# Scatter a random sample of hours so the plot stays readable
+set.seed(42)
+demand %>%
+  filter(!is.na(Temperature)) %>%
+  slice_sample(n = 3000) %>%
+  ggplot(aes(Temperature, ActualDemandMW)) +
+  geom_point(color = c_aqua, alpha = 0.35, size = 1) +
+  geom_smooth(method = "lm", se = FALSE, color = "black", linewidth = 0.8) +
+  labs(title = "Temperature vs hourly demand (3,000 sampled hours)",
+       x = "Temperature (F)", y = "Demand (MW)") +
+  theme_nges()
+
+# Correlation and peak-event rates by temperature band
+cor(demand$Temperature, demand$ActualDemandMW, use = "complete.obs")
+
+demand %>%
+  filter(!is.na(Temperature)) %>%
+  mutate(TempBand = cut(Temperature, c(-100, 32, 60, 80, 95, 200),
+                        labels = c("Below 32F", "32-60F", "60-80F", "80-95F", "Above 95F"))) %>%
+  group_by(TempBand) %>%
+  summarise(Hours = n(),
+            PeakEventRate_Pct = round(mean(PeakDemandEvent) * 100, 1),
+            .groups = "drop") %>%
+  kable(caption = "Peak-event rate by temperature band")
+```
+
+This is the most important early finding, because it contradicts the client's
+Theory 1. The correlation between temperature and demand is 0.002, essentially
+zero. Hours above 95 F average slightly *lower* demand (748 MW) than cooler hours
+(751 MW), and the share of hours flagged as peak events sits near 10% in every
+temperature band. Humidity and wind speed behave the same way. In this dataset,
+weather does not move system demand, so a forecasting strategy built around
+better weather feeds would be spending money in the wrong place.
+
+# What Actually Moves Demand: Customer Segment Loads
+
+```{r loads}
+# Compare actual demand with the sum of the three customer segment loads
+demand <- demand %>%
+  mutate(LoadSum = ResidentialLoadMW + CommercialLoadMW + IndustrialLoadMW)
+
+cor(demand$ActualDemandMW, demand$LoadSum)
+
+# How the total load splits across segments
+demand %>%
+  summarise(Residential_Pct = round(sum(ResidentialLoadMW) / sum(LoadSum) * 100, 1),
+            Commercial_Pct  = round(sum(CommercialLoadMW)  / sum(LoadSum) * 100, 1),
+            Industrial_Pct  = round(sum(IndustrialLoadMW)  / sum(LoadSum) * 100, 1)) %>%
+  kable(caption = "Share of total load by customer segment")
+
+set.seed(42)
+demand %>%
+  slice_sample(n = 3000) %>%
+  ggplot(aes(LoadSum, ActualDemandMW)) +
+  geom_point(color = c_blue, alpha = 0.3, size = 1) +
+  labs(title = "Sum of segment loads vs actual system demand",
+       x = "Residential + Commercial + Industrial load (MW)",
+       y = "Actual demand (MW)") +
+  theme_nges()
+```
+
+Here is where the signal lives. The sum of residential, commercial and industrial
+load correlates with actual demand at 0.984, and the residual between the two has
+a standard deviation of only about 25 MW. Residential customers carry 46.6% of
+the load, commercial 29.4% and industrial 24.0%. Demand spikes happen when two or
+three segments run high at the same time, not when the weather turns. That points
+Day 2 modeling squarely at segment-level load data from the AMI meters rather
+than at weather forecasting.
+
+# Peak Demand Events
+
+```{r peaks}
+# How do flagged peak events relate to the demand level itself?
+demand %>%
+  group_by(PeakDemandEvent) %>%
+  summarise(Hours = n(),
+            AvgDemand_MW = round(mean(ActualDemandMW), 1),
+            MinDemand_MW = round(min(ActualDemandMW), 1),
+            .groups = "drop") %>%
+  kable(caption = "Peak vs non-peak hours")
+
+# Peak-event rate by demand decile
+demand %>%
+  mutate(Decile = ntile(ActualDemandMW, 10)) %>%
+  group_by(Decile) %>%
+  summarise(PeakRate_Pct = round(mean(PeakDemandEvent) * 100, 1), .groups = "drop") %>%
+  kable(caption = "Share of hours flagged as peak events, by demand decile")
+```
+
+Exactly 2,500 of the 25,000 hours (10%) are flagged as peak events, and the
+decile table shows the flag is simply the top tenth of hourly demand. Peak hours
+average 996.9 MW against 723.0 MW for everything else. This is useful because it
+means "predicting peak events" and "predicting demand accurately at the high end"
+are the same problem.
+
+# Forecast Accuracy Today
+
+```{r forecast}
+# Overall accuracy of the existing NGES forecast
+demand %>%
+  filter(!is.na(ForecastedDemandMW)) %>%
+  summarise(MAE_MW   = round(mean(abs(ActualDemandMW - ForecastedDemandMW)), 1),
+            MAPE_Pct = round(mean(abs(ActualDemandMW - ForecastedDemandMW) /
+                                  ActualDemandMW) * 100, 2),
+            Bias_MW  = round(mean(ActualDemandMW - ForecastedDemandMW), 2)) %>%
+  kable(caption = "Current forecast accuracy")
+
+# Error distribution
+demand %>%
+  filter(!is.na(ForecastedDemandMW)) %>%
+  ggplot(aes(ForecastErrorMW)) +
+  geom_histogram(bins = 50, fill = c_blue) +
+  labs(title = "Distribution of forecast error (actual minus forecast)",
+       x = "Forecast error (MW)", y = "Hours") +
+  theme_nges()
+
+# Is the forecast worse during peak events?
+demand %>%
+  filter(!is.na(ForecastedDemandMW)) %>%
+  group_by(PeakDemandEvent) %>%
+  summarise(MAE_MW  = round(mean(abs(ActualDemandMW - ForecastedDemandMW)), 1),
+            Bias_MW = round(mean(ActualDemandMW - ForecastedDemandMW), 2),
+            .groups = "drop") %>%
+  kable(caption = "Forecast error, peak vs non-peak hours")
+```
+
+The current forecast lands within 23.8 MW of actuals on average, a MAPE of about
+3.3%, with essentially no overall bias (-0.04 MW). Interestingly, accuracy during
+peak events (MAE 23.9 MW) is nearly identical to normal hours (23.8 MW), so the
+client's Theory 3, that the forecast systematically underestimates peaks, is not
+supported. The real issue is different: a plus-or-minus 24 MW miss matters far
+more when the system is already at 997 MW and infrastructure is running near its
+limits than it does on an average afternoon. Tightening that error band during
+high-load hours is where forecasting value comes from.
+
+# Infrastructure Risk & Utilization
+
+```{r infra}
+# Correlation of each factor with the composite risk score
+infra %>%
+  summarise(Age_vs_Risk      = round(cor(InfrastructureAgeYears, RiskScore), 2),
+            Util_vs_Risk     = round(cor(CurrentUtilizationPct, RiskScore), 2),
+            Outages_vs_Risk  = round(cor(OutagesLast5Years, RiskScore), 2),
+            Growth_vs_Risk   = round(cor(ProjectedLoadGrowthPct, RiskScore), 2)) %>%
+  kable(caption = "Correlation with substation risk score")
+
+# Utilization bands
+infra %>%
+  mutate(UtilBand = cut(CurrentUtilizationPct, c(0, 70, 85, 90, 100, 999),
+                        labels = c("Under 70%", "70-85%", "85-90%", "90-100%", "Over 100%"))) %>%
+  count(UtilBand, name = "Substations") %>%
+  ggplot(aes(UtilBand, Substations)) +
+  geom_col(fill = c_blue, width = 0.55) +
+  geom_text(aes(label = Substations), vjust = -0.4, fontface = "bold") +
+  labs(title = "Substations by current utilization band",
+       x = NULL, y = "Substations") +
+  theme_nges()
+
+# The ten highest-risk substations
+infra %>%
+  arrange(desc(RiskScore)) %>%
+  head(10) %>%
+  dplyr::select(SubstationID, Region, InfrastructureAgeYears, CurrentUtilizationPct,
+         OutagesLast5Years, ProjectedLoadGrowthPct, RiskScore) %>%
+  kable(caption = "Ten highest-risk substations")
+```
+
+The 500 substations average 26.9 years of age and 74.7% utilization, but the
+distribution has a worrying tail: 127 substations run above 90% of rated
+capacity and 35 are already above 100%. Age is the strongest single driver of the
+risk score (r = 0.52), followed by utilization (0.44) and outage history (0.39).
+Thirty-one substations score 70 or higher on risk, a group we treat as the
+critical tier; the North (10) and West (8) regions hold the most of them. The
+worst asset, substation 1103 in the South, combines 47 years of age with 8
+outages in five years and 9.9% projected load growth. This table becomes the
+starting point for Saturday's capital prioritization work.
+
+# Demand Response Programs: First Look
+
+```{r dr}
+# Cost per MW of reduction is the natural effectiveness measure
+dr <- dr %>% mutate(CostPerMW = ProgramCost / DemandReductionMW)
+
+dr %>%
+  group_by(CustomerType) %>%
+  summarise(Events            = n(),
+            AvgReduction_MW   = round(mean(DemandReductionMW), 1),
+            AvgReduction_Pct  = round(mean(DemandReductionMW / PeakDemandBeforeMW) * 100, 1),
+            MedianCostPerMW   = round(median(CostPerMW), 0),
+            .groups = "drop") %>%
+  kable(caption = "Demand response performance by customer type")
+
+# The distribution of cost-effectiveness is the real story
+ggplot(dr, aes(CostPerMW)) +
+  geom_histogram(bins = 60, fill = c_blue) +
+  scale_x_log10(labels = dollar) +
+  labs(title = "Cost per MW reduced across 8,000 DR events (log scale)",
+       x = "Cost per MW (log scale)", y = "Events") +
+  theme_nges()
+```
+
+Across 8,000 events the program removed 1.33 million MW of peak load for $420.2
+million. Customer types perform almost identically: residential, commercial and
+industrial all cut about 11% of peak demand per event at a median cost near
+$330/MW. The spread across individual events is enormous, though, from about $12
+to $7,680 per MW. The program's problem is not which customers it recruits but
+how inconsistently events are run. That cost-effectiveness tail is Saturday's
+biggest financial opportunity, and we quantify it there.
+
+# Key Findings & Day 2 Hypotheses
+
+Five things stood out from Day 1:
+
+1. Weather, calendar and region explain almost none of the variation in demand.
+   Temperature correlates with demand at 0.002 and peak events occur at the same
+   10% rate in every temperature band. Theory 1 is not supported by this data.
+2. Demand is driven by customer segment loads (correlation 0.984 with the segment
+   sum). Volatility comes from segments peaking together.
+3. The current forecast (MAE 23.8 MW, MAPE 3.3%) is unbiased and no worse during
+   peaks, but a 24 MW error band is expensive when 127 substations run above 90%
+   utilization.
+4. Infrastructure risk is concentrated: 31 critical substations, with age the
+   strongest driver, and 35 assets already past 100% utilization.
+5. Demand response works but is wildly inconsistent per dollar: identical median
+   performance across customer types, with a long tail of events costing over
+   $1,000/MW.
+
+For Day 2 we will test three hypotheses: (a) a model built on segment loads will
+beat the current forecast while a weather-based model will not; (b) a small
+critical tier of substations should absorb most near-term capital; and (c)
+rebalancing the least efficient quartile of DR events can recover most of the
+$95-120M exposure leadership described. Data limitations to carry forward: 2%
+missing weather and forecast values, impossible humidity readings, and the fact
+that the demand file's 100 substations do not overlap cleanly with the
+infrastructure file's 500, which keeps us from joining the two at asset level.

@@ -1,0 +1,356 @@
+---
+title: "NGES Consulting Engagement - Day 2: Predictive Modeling, Infrastructure Risk, Demand Response & ROI"
+author: "Ujwal Dasari"
+date: "`r format(Sys.time(), '%B %d, %Y  %H:%M:%S')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    code_folding: show
+    number_sections: true
+  word_document:
+    toc: true
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 8, fig.height = 4.5)
+c_blue   <- "#2a78d6"; c_orange <- "#eb6834"; c_aqua <- "#1baf7a"
+c_red    <- "#d03b3b"; c_muted  <- "#898781"; c_grid <- "#e1e0d9"
+theme_nges <- function() {
+  ggplot2::theme_minimal(base_size = 12) +
+    ggplot2::theme(panel.grid.minor = ggplot2::element_blank(),
+                   panel.grid.major = ggplot2::element_line(color = c_grid),
+                   plot.title = ggplot2::element_text(face = "bold"),
+                   axis.text = ggplot2::element_text(color = c_muted))
+}
+```
+
+# Introduction
+
+Day 1 told us where the signal is: demand tracks customer segment loads almost
+perfectly and ignores the weather, infrastructure risk is concentrated in a
+31-substation critical tier, and demand response results swing wildly per dollar
+spent. Day 2 turns those observations into the four analytical deliverables the
+client asked for: a forecasting model comparison, an infrastructure investment
+priority list, a demand response optimization case, and a financial impact and
+ROI assessment. Everything here feeds Sunday's Board presentation and the
+Power BI dashboard.
+
+```{r load}
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(knitr)
+# ranger is a fast random forest implementation; install once if needed:
+# install.packages("ranger")
+library(ranger)
+
+data_dir <- if (file.exists("NGES Energy Demand Forecasting Dataset.csv")) "." else "../data"
+demand <- read_csv(file.path(data_dir, "NGES Energy Demand Forecasting Dataset.csv"))
+infra  <- read_csv(file.path(data_dir, "NGES Infrastructure Risk & Planning Dataset.csv"))
+dr     <- read_csv(file.path(data_dir, "NGES Demand Response Effectiveness Dataset.csv"))
+
+demand <- demand %>%
+  mutate(Timestamp = mdy_hm(Timestamp),
+         Hour  = hour(Timestamp),
+         Month = month(Timestamp),
+         Dow   = wday(Timestamp)) %>%
+  arrange(Timestamp)
+```
+
+# Feature Engineering & Evaluation Design
+
+```{r features}
+# Median-impute the ~2% missing weather readings documented on Day 1
+demand <- demand %>%
+  mutate(Temperature = replace_na(Temperature, median(Temperature, na.rm = TRUE)),
+         Humidity    = replace_na(Humidity,    median(Humidity,    na.rm = TRUE)))
+
+# Time-based split: first 80% of hours train the models, the most recent 20%
+# (roughly the 2025 portion) tests them. A random split would leak the future
+# into training and flatter every model, so we avoid it.
+cut_row <- floor(nrow(demand) * 0.8)
+train <- demand[1:cut_row, ]
+test  <- demand[(cut_row + 1):nrow(demand), ]
+range(train$Timestamp); range(test$Timestamp)
+
+# Helper to score any set of predictions on the test window
+score <- function(actual, pred) {
+  tibble(MAE  = round(mean(abs(actual - pred)), 1),
+         RMSE = round(sqrt(mean((actual - pred)^2)), 1),
+         R2   = round(1 - sum((actual - pred)^2) / sum((actual - mean(actual))^2), 3))
+}
+```
+
+We evaluate every model on the same held-out window and against the same
+yardstick: the client's own forecast, which scores an MAE of about 24.0 MW on
+that window. A model only matters if it beats that number.
+
+# Baseline Model: Weather and Calendar Only
+
+```{r baseline}
+# Linear regression using only the variables Theory 1 says should matter:
+# weather, time of day, month, day of week, region and customer count.
+lm_weather <- lm(ActualDemandMW ~ Temperature + Humidity + WindSpeed +
+                   factor(Hour) + factor(Month) + factor(Dow) +
+                   Region + CustomerCount, data = train)
+score(test$ActualDemandMW, predict(lm_weather, test)) %>%
+  kable(caption = "Baseline: weather + calendar linear model")
+```
+
+The baseline fails completely, and that failure is informative. An MAE around
+113 MW and an R-squared of essentially zero means weather and calendar carry no
+usable forecasting signal in this data. Any investment aimed at "better weather
+forecasting" would not improve demand forecasts at NGES.
+
+# Segment-Load Models
+
+```{r load-models}
+# Same linear model, now adding the three customer segment loads
+lm_loads <- lm(ActualDemandMW ~ ResidentialLoadMW + CommercialLoadMW +
+                 IndustrialLoadMW + Temperature + Humidity + WindSpeed +
+                 factor(Hour) + factor(Month) + Region, data = train)
+res_lm <- score(test$ActualDemandMW, predict(lm_loads, test))
+
+# Advanced model: random forest on the full feature set
+rf <- ranger(ActualDemandMW ~ ResidentialLoadMW + CommercialLoadMW +
+               IndustrialLoadMW + Temperature + Humidity + WindSpeed +
+               Hour + Month + Dow + CustomerCount + Region,
+             data = train, num.trees = 300, importance = "impurity", seed = 42)
+res_rf <- score(test$ActualDemandMW, predict(rf, test)$predictions)
+
+# The client's own forecast on the identical test window, as the benchmark
+bench <- test %>% filter(!is.na(ForecastedDemandMW))
+res_nges <- score(bench$ActualDemandMW, bench$ForecastedDemandMW)
+
+bind_rows("Current NGES forecast"      = res_nges,
+          "Linear model + segment loads" = res_lm,
+          "Random forest (all features)" = res_rf,
+          .id = "Model") %>%
+  kable(caption = "Model comparison on the 2025 hold-out window")
+```
+
+The segment-load linear model beats the incumbent forecast clearly, landing
+near an MAE of 20 MW (R-squared about 0.97) against the current forecast's
+24 MW, roughly a 17% error reduction. The random forest, despite its extra
+machinery, only matches the incumbent at about 24 MW; exact values shift
+slightly with the random seed. It is worth pausing on the fact that the simple,
+fully explainable linear model wins: demand here is close to the sum of its
+segment loads plus irreducible noise of about 25 MW, so extra model complexity
+buys nothing and here even costs a little. For a regulated utility that must
+defend its planning methods to a public utility commission, an interpretable
+model that outperforms is the best possible outcome.
+
+```{r importance}
+# Which variables does the random forest actually lean on?
+enframe(ranger::importance(rf), name = "Feature", value = "Importance") %>%
+  mutate(Share = round(Importance / sum(Importance) * 100, 1)) %>%
+  arrange(desc(Share)) %>%
+  dplyr::select(Feature, Share) %>%
+  head(8) %>%
+  ggplot(aes(reorder(Feature, Share), Share)) +
+  geom_col(fill = c_blue, width = 0.6) +
+  geom_text(aes(label = paste0(Share, "%")), hjust = -0.15, size = 3.5) +
+  coord_flip() +
+  labs(title = "Random forest feature importance",
+       x = NULL, y = "Share of importance (%)") +
+  theme_nges()
+```
+
+Residential load alone carries roughly half the model's importance, commercial
+about a quarter and industrial about a fifth, with every weather and calendar
+variable under 1%. The practical translation: NGES's forecasting future is
+segment-level load forecasting from AMI meter data, refreshed near real time,
+not weather modeling.
+
+## Predicting Peak Events
+
+```{r peaks}
+# Day 1 showed peak events are exactly the top decile of demand, so an accurate
+# demand forecast doubles as a peak-event early-warning system. We flag any hour
+# whose predicted demand crosses the historical peak threshold.
+thresh <- min(train$ActualDemandMW[train$PeakDemandEvent == 1])
+pred_peak <- as.integer(predict(lm_loads, test) >= thresh)
+actual_peak <- test$PeakDemandEvent
+tibble(Precision = round(sum(pred_peak & actual_peak) / sum(pred_peak), 3),
+       Recall    = round(sum(pred_peak & actual_peak) / sum(actual_peak), 3)) %>%
+  kable(caption = "Peak-event detection from the demand forecast")
+```
+
+Flagging hours whose forecast crosses the peak threshold catches the large
+majority of true peak events with high precision. Hours near the boundary are
+the misses, which is exactly where a plus-or-minus 20 MW error band bites. In
+operations this becomes a simple traffic-light rule: forecast above the
+threshold, or within one error band of it, triggers demand response
+pre-positioning.
+
+# Infrastructure Risk Analysis & Capital Priorities
+
+```{r infra-tiers}
+# Tier the 500 substations by composite risk score. We use explicit >= boundaries
+# (rather than cut) so a score of exactly 70 lands in the critical tier.
+infra <- infra %>%
+  mutate(RiskTier = factor(case_when(RiskScore >= 70 ~ "Critical",
+                                     RiskScore >= 55 ~ "Elevated",
+                                     RiskScore >= 40 ~ "Moderate",
+                                     TRUE            ~ "Low"),
+                           levels = c("Low", "Moderate", "Elevated", "Critical")))
+infra %>%
+  count(RiskTier, name = "Substations") %>%
+  mutate(Share_Pct = round(Substations / sum(Substations) * 100, 1)) %>%
+  kable(caption = "Substations by risk tier")
+
+# Regional distribution of the critical tier
+infra %>%
+  filter(RiskTier == "Critical") %>%
+  count(Region, name = "CriticalSubstations") %>%
+  arrange(desc(CriticalSubstations)) %>%
+  kable(caption = "Critical-tier substations by region")
+```
+
+Thirty-one substations (6.2%) sit in the critical tier, concentrated in the
+North (10) and West (8). Another 35 assets systemwide are running past 100% of
+rated capacity, meaning they depend on favorable conditions every single day.
+
+```{r priority-list}
+# Investment priority: rank critical-tier assets by a blend of risk score and
+# projected load growth, since growth converts today's risk into tomorrow's outage.
+priority <- infra %>%
+  filter(RiskTier == "Critical") %>%
+  mutate(PriorityScore = round(0.7 * RiskScore + 3 * ProjectedLoadGrowthPct, 1)) %>%
+  arrange(desc(PriorityScore)) %>%
+  dplyr::select(SubstationID, Region, InfrastructureAgeYears, CurrentUtilizationPct,
+         OutagesLast5Years, ProjectedLoadGrowthPct, RiskScore, PriorityScore)
+head(priority, 15) %>% kable(caption = "Top 15 capital investment priorities")
+
+# Visual: utilization vs risk with the critical tier highlighted
+ggplot(infra, aes(CurrentUtilizationPct, RiskScore)) +
+  geom_point(aes(color = RiskTier == "Critical"), size = 1.6, alpha = 0.6) +
+  scale_color_manual(values = c(`FALSE` = c_blue, `TRUE` = c_red),
+                     labels = c("Other substations", "Critical tier"), name = NULL) +
+  geom_vline(xintercept = 100, linetype = "dashed", color = c_muted) +
+  labs(title = "Utilization vs risk score, critical tier in red",
+       x = "Current utilization (%)", y = "Composite risk score") +
+  theme_nges()
+```
+
+The recommendation that falls out of this table is phased and affordable: put
+the 31 critical-tier assets on a 3-5 year upgrade schedule ordered by the
+priority score, starting with substations like 1445 (West, 48 years old, 92.8%
+utilized) and 1402/1434 (North, both past 92% with double-digit projected
+growth). The roughly 130 elevated-tier assets get condition monitoring and
+demand response coverage instead of immediate capital, which is what funds the
+deferral value in the ROI section. One caution for the Board: substation 1103
+tops the raw risk list mostly on outage history (8 in five years) despite modest
+utilization, a reminder the composite score blends several failure modes and
+engineering review should confirm each project before commitment.
+
+# Demand Response Optimization
+
+```{r dr-quartiles}
+dr <- dr %>% mutate(CostPerMW = ProgramCost / DemandReductionMW)
+
+# Split the 8,000 events into cost-effectiveness quartiles
+dr <- dr %>% mutate(Quartile = ntile(CostPerMW, 4))
+dr %>%
+  group_by(Quartile) %>%
+  summarise(Events        = n(),
+            AvgCostPerMW  = round(mean(CostPerMW), 0),
+            TotalCost_M   = round(sum(ProgramCost) / 1e6, 1),
+            TotalMW       = round(sum(DemandReductionMW), 0),
+            .groups = "drop") %>%
+  kable(caption = "DR events by cost-effectiveness quartile")
+```
+
+The quartile table is the whole demand response story in four rows. The best
+quartile of events removes load at a little over $100 per MW; the worst quartile
+averages well over $1,100 per MW, eleven times more, and absorbed $141.3 million
+of the program's $420.2 million total spend while delivering only about 10% of
+the megawatts. Because Day 1 showed customer types perform identically, this is
+an execution problem (event timing, sizing and incentive design), not a
+recruitment problem.
+
+```{r dr-savings}
+# Savings case: re-run the worst quartile's MW at the program's own median cost
+med_cpm <- median(dr$CostPerMW)
+worst   <- dr %>% filter(Quartile == 4)
+savings <- sum(worst$ProgramCost) - sum(worst$DemandReductionMW) * med_cpm
+tibble(MedianCostPerMW   = round(med_cpm, 0),
+       WorstQuartileCost_M = round(sum(worst$ProgramCost) / 1e6, 1),
+       SameMWatMedian_M    = round(sum(worst$DemandReductionMW) * med_cpm / 1e6, 1),
+       Savings_M           = round(savings / 1e6, 1)) %>%
+  kable(caption = "Savings if the worst quartile performed at the median")
+```
+
+Delivering the worst quartile's megawatts at the program's own median
+cost-effectiveness ($330/MW, a standard the program already meets half the
+time) would have cost $42.8 million instead of $141.3 million, freeing $98.5
+million over the period with zero megawatts of peak reduction given up. Even a
+narrower fix limited to the 1,075 events that cost more than $1,000/MW recovers
+about $62.6 million. Notably, these figures bracket the $95-120 million exposure
+Executive Leadership quoted in the engagement letter: most of that money is
+recoverable from inside the DR budget alone.
+
+# Financial Impact & ROI
+
+```{r roi}
+# The dataset spans roughly 2.83 years, so period savings are annualized by /2.83
+roi <- tribble(
+  ~Initiative,                      ~Conservative, ~Expected, ~Optimistic,
+  "DR optimization ($M/yr)",         22.1,          34.8,      40.0,
+  "Risk-based capital targeting ($M/yr)", 6.0,      10.0,      15.0,
+  "Forecast upgrade ($M/yr)",        0.5,           1.0,       2.0)
+roi %>%
+  bind_rows(summarise(roi, Initiative = "Total annual value",
+                      across(where(is.numeric), sum))) %>%
+  kable(caption = "Estimated annual value by scenario")
+```
+
+The assumptions behind each line, stated plainly so the Board can challenge them:
+
+- **DR optimization.** The $98.5M period saving annualizes to $34.8M (expected).
+  Conservative takes only the over-$1,000/MW fix ($62.6M, or $22.1M/yr);
+  optimistic adds modest procurement leverage on the remaining events.
+- **Risk-based capital targeting.** Concentrating near-term capital on 31
+  critical assets instead of a broad age-based program defers roughly $100-150M
+  of lower-priority spend by 3-5 years; at a utility cost of capital near 7-8%,
+  deferral plus avoided outage cost is worth an estimated $6-15M per year.
+- **Forecast upgrade.** Cutting peak-hour forecast error about 17% trims
+  emergency power purchases across roughly 880 peak hours per year; at a
+  $100-200/MWh emergency premium this is worth $0.5-2M per year. It is the
+  smallest line but also the cheapest to implement, and it is what makes the
+  peak-warning system work.
+
+Implementation costs are estimated at about $8M one-time (forecasting platform,
+DR program redesign, analytics staffing) plus $5M per year to run. Against the
+expected $45.8M of annual value, the portfolio pays back in well under a year
+and returns roughly five to nine times its cost annually thereafter. Over a
+three-year capital planning window the expected case creates about $137M of
+value, which more than neutralizes the $95-120M exposure leadership identified.
+
+# Limitations
+
+Honesty about limits keeps these numbers defensible. The demand data contains
+about 25 MW of hour-to-hour noise no model can remove, so forecast gains beyond
+roughly 20 MW MAE should not be promised. Weather showed no effect in this
+dataset; in most real service territories it does, so the finding should be
+re-tested once NGES validates its weather feeds (the impossible humidity
+readings suggest sensor problems). The demand file's substations do not join
+cleanly to the infrastructure file, keeping the analysis at regional rather than
+asset level. And the deferral and emergency-premium values rest on planning
+assumptions the finance team should replace with NGES's actual cost of capital
+and procurement records before regulatory filings.
+
+# Conclusions
+
+Three moves, in priority order: fix demand response execution (largest, fastest,
+self-funding), target capital at the 31-substation critical tier (defers major
+spend while cutting outage risk where it is concentrated), and upgrade
+forecasting to a segment-load model (small direct savings, but it powers the
+peak-event warning system and the dashboard). Together they turn a $95-120M
+exposure into an expected $45.8M of annual value at a cost of about $5M per year
+to sustain.

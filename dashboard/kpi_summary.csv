@@ -1,0 +1,2 @@
+PeakDemandEvents,ForecastMAPE_Pct,ProposedModelMAPE_Pct,AvgRiskScore,CriticalSubstations,SubstationsOver90Util,TotalDRReductionMW,TotalDRSpendM,MedianCostPerMW,DRSavingsOpportunityM,ExpectedAnnualValueM
+2500,3.32,2.75,53.2,31,127,1326455,420.2,330.0,98.5,45.8

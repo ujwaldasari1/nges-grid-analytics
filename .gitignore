@@ -1,0 +1,7 @@
+.Rproj.user/
+*.Rproj
+.Rhistory
+*.html
+__pycache__/
+.DS_Store
+Thumbs.db
