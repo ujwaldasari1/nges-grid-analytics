@@ -7,7 +7,7 @@ grew from 14 in 2022 to 34 in 2025 with an estimated **$95–120M of financial e
 I analyzed three years of hourly demand data, 500 substations, and 8,000 demand response events
 to answer one question: *why is demand volatility rising, and what should the utility do about it?*
 
-**🔗 Live dashboard:** _deploying on Streamlit Community Cloud — link coming shortly_
+**🔗 Live dashboard:** [ujwaldasari1-nges-grid-analytics-app-jy2t3m.streamlit.app](https://ujwaldasari1-nges-grid-analytics-app-jy2t3m.streamlit.app/)
 
 ## Headline findings
 
