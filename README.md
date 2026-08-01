@@ -17,7 +17,7 @@ to answer one question: *why is demand volatility rising, and what should the ut
 | 2 | **Customer segment loads are the driver.** Demand tracks the sum of residential + commercial + industrial loads at **0.984** correlation. Spikes happen when segments peak together. | Segment share of model signal: ~99% |
 | 3 | **A simple model beats the incumbent forecast by 17%.** A fully explainable linear model on segment loads scores **19.9 MW MAE vs 24.0 MW** for the utility's forecast (time-based hold-out). A random forest adds nothing. | R² 0.969, MAPE 3.3% → ~2.8% |
 | 4 | **Peak events become predictable.** Peaks are simply the top decile of demand (≥ ~929 MW), so the forecast doubles as an early-warning system: **88.6% precision / 86% recall**. | Hold-out 2025 window |
-| 5 | **Grid risk is concentrated.** **31 of 500 substations** are critical (age is the strongest driver, r = 0.52); **35 already run past 100%** of rated capacity. | Two regions hold ~60% of critical assets |
+| 5 | **Grid risk is concentrated.** **31 of 500 substations** are critical (projected load growth r = 0.55 and age r = 0.52 are the top, near-tied drivers); **35 already run past 100%** of rated capacity. | Two regions hold ~60% of critical assets |
 | 6 | **$98.5M is recoverable from demand response execution alone.** The worst quartile of events costs **11×** more per MW than the best and absorbed $141M of the $420M program for 10% of results — with identical performance across customer types, it's an execution problem, not a recruitment problem. | 8,000 DR events |
 
 **Bottom line:** three recommendations worth an expected **$45.8M/yr** (conservative $28.6M,

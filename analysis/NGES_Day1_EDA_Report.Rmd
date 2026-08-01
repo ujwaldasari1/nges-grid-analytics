@@ -340,8 +340,10 @@ infra %>%
 
 The 500 substations average 26.9 years of age and 74.7% utilization, but the
 distribution has a worrying tail: 127 substations run above 90% of rated
-capacity and 35 are already above 100%. Age is the strongest single driver of the
-risk score (r = 0.52), followed by utilization (0.44) and outage history (0.39).
+capacity and 35 are already above 100%. Projected load growth (r = 0.55) and age (r = 0.52) are the two strongest
+drivers of the risk score, essentially tied, followed by utilization (0.44)
+and outage history (0.39) - so the score looks forward at expected growth,
+not just backward at present condition.
 Thirty-one substations score 70 or higher on risk, a group we treat as the
 critical tier; the North (10) and West (8) regions hold the most of them. The
 worst asset, substation 1103 in the South, combines 47 years of age with 8
@@ -392,8 +394,8 @@ Five things stood out from Day 1:
 3. The current forecast (MAE 23.8 MW, MAPE 3.3%) is unbiased and no worse during
    peaks, but a 24 MW error band is expensive when 127 substations run above 90%
    utilization.
-4. Infrastructure risk is concentrated: 31 critical substations, with age the
-   strongest driver, and 35 assets already past 100% utilization.
+4. Infrastructure risk is concentrated: 31 critical substations, with load
+   growth and age the top near-tied drivers, and 35 assets already past 100% utilization.
 5. Demand response works but is wildly inconsistent per dollar: identical median
    performance across customer types, with a long tail of events costing over
    $1,000/MW.

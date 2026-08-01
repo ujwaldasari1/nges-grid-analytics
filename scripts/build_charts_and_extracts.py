@@ -109,7 +109,7 @@ ax.scatter(hi.InfrastructureAgeYears, hi.RiskScore, s=26, color=CRIT, zorder=4, 
 ax.axhline(70, color=CRIT, lw=1, ls="--", alpha=0.6)
 ax.set_xlabel("Infrastructure age (years)"); ax.set_ylabel("Composite risk score"); style(ax); ax.grid(axis="both")
 ax.legend(frameon=False, loc="lower right", fontsize=9)
-ax.set_title("Age is the strongest risk driver (r = 0.52); 31 assets are critical", loc="left", fontsize=13, fontweight="bold", color=INK, pad=12)
+ax.set_title("Risk climbs with age and load growth; 31 assets are critical", loc="left", fontsize=13, fontweight="bold", color=INK, pad=12)
 save(fig, "06_infra_risk.png")
 
 # 7. Utilization bands

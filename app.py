@@ -133,7 +133,7 @@ with tab2:
             .head(15))
     st.dataframe(prio, use_container_width=True, hide_index=True)
     st.info("**Finding:** risk is concentrated, not spread - 31 of 500 substations are critical "
-            "(age is the strongest driver, r = 0.52) and 35 already run past 100% of rated capacity. "
+            "(load growth r = 0.55 and age r = 0.52 are the top drivers) and 35 already run past 100% of rated capacity. "
             "A two-speed plan funds itself: upgrade the critical 31 in ranked order, monitor the rest, "
             "and defer $100-150M of lower-priority spend.")
 
